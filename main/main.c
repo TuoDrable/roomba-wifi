@@ -11,16 +11,22 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
+#include "terminal.h"
+
 #include <string.h>
 #include <stdio.h>
+
+
+#define STORAGE_NAMESPACE "storage"
 
 static void initialise_wifi(void);
 static esp_err_t event_handler(void *ctx, system_event_t *event);
 
 static wifi_config_t sta_config = {
 	.sta = {
-		.bssid_set = false
-	}
+		.ssid = CONFIG_WIFI_SSID,
+		.password = CONFIG_WIFI_PASSWORD,
+	},
 };
 
 static const char *TAG = "roomba-wifi";
@@ -56,68 +62,83 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
+static void command_config_wifi(char* args, void* unused)
+{
+	char* tmp;
+	char* ssid = args;
+	char* password = strchr((const char*)args, ' ');
+
+
+	if (args == NULL)
+	{
+		ESP_LOGW(TAG, "No ssid found");
+		ESP_LOGW(TAG, "usage: setup_wifi SSID PASSWORD");
+		return;
+	}
+
+	if (password == NULL)
+	{
+		ESP_LOGW(TAG, "No password found");
+		ESP_LOGW(TAG, "usage: setup_wifi SSID PASSWORD");
+		return;
+	}
+
+	// seperate the SSID string
+	*password =  '\0';
+
+	// sanitize password, set start right
+	do
+	{
+		password++;
+	}
+	while (*password == ' ');
+
+	// set end to \0
+	tmp = password;
+	while (*tmp != '\r' && *tmp != '\n' && *tmp != '\0')
+		tmp++;
+
+	*tmp = '\0';
+
+	strcpy(&sta_config.sta.ssid, ssid);
+	strcpy(&sta_config.sta.password, password);
+
+    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", sta_config.sta.ssid);
+	ESP_ERROR_CHECK( esp_wifi_disconnect() );
+	ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &sta_config) );
+	ESP_ERROR_CHECK( esp_wifi_connect() );
+
+}
+
 void app_main(void)
 {
     nvs_flash_init();
 
-	//1. Setup UART
+	//1. Setup terminal
 
-	#define UART_INTR_NUM 17                                //choose one interrupt number from soc.h
-
-    //a. Set UART parameter
-	int uart_num = 0;                                       //uart port number
-	uart_config_t uart_config = {
-	 .baud_rate = 115200,                    //baudrate
-	 .data_bits = UART_DATA_8_BITS,                       //data bit mode
-	 .parity = UART_PARITY_DISABLE,                       //parity mode
-	 .stop_bits = UART_STOP_BITS_1,                       //stop bit mode
-	 .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,               //hardware flow control(cts/rts)
-	 .rx_flow_ctrl_thresh = 120,                          //flow control threshold
-	};
-	uart_param_config(uart_num, &uart_config);
-	//b1. Setup UART driver(with UART queue)
-	QueueHandle_t uart_queue;
-	//parameters here are just an example, tx buffer size is 2048
-	uart_driver_install(uart_num, 1024 * 2, 1024 * 2, 10, UART_INTR_NUM, &uart_queue);
-	//3. Read data from UART.
-	uint8_t data[128];
-	int length = 0;
-	int totallength = 0;
-
-	ESP_LOGI(TAG, "enter ssid: ");
-    do {
-		length = uart_read_bytes(uart_num, data, sizeof(data), 100);
-		if (length > 0)
-		{
-			memcpy(&sta_config.sta.ssid + totallength, data, length);
-			totallength += length;
-			uart_write_bytes(uart_num, (const char*)data, length);
-		}
-    } while (length == 0 || data[length -1] != '\r');
-
-    // replace carriage return with 0
-    sta_config.sta.ssid[totallength -1] = '\0';
-
-    totallength = 0;
-    ESP_LOGI(TAG, "enter password: ");
-    do {
-		length = uart_read_bytes(uart_num, data, sizeof(data), 100);
-		if (length > 0)
-		{
-			memcpy(&sta_config.sta.password + totallength, data, length);
-			totallength += length;
-			uart_write_bytes(uart_num, (const char*)data, length);
-		}
-    } while (length == 0 || data[length -1] != '\r');
-
-    // replace carriage return with 0
-    sta_config.sta.password[totallength -1] = '\0';
+    terminal_init();
+    terminal_register_command("setup_wifi", command_config_wifi, NULL);
 
     initialise_wifi();
 
     xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
                         false, true, portMAX_DELAY);
 }
+
+/*
+static esp_err_t get_wifi_args_from_nvs(wifi_config_t* config)
+{
+
+    nvs_handle my_handle;
+    esp_err_t err;
+    size_t blob_size = sizeof(sta_config);
+
+    err = nvs_open(STORAGE_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK)
+    	return err;
+
+    return nvs_get_blob(my_handle, "wifi_config", (void*)config, &blob_size);
+}*/
 
 
 static void initialise_wifi(void)
@@ -127,7 +148,7 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_FLASH) );
     ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", sta_config.sta.ssid);
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &sta_config) );

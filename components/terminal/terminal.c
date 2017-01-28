@@ -11,61 +11,109 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
+#include "terminal.h"
+
 #include <string.h>
 #include <stdio.h>
 
-static void initialise_wifi(void);
-static esp_err_t event_handler(void *ctx, system_event_t *event);
+#define TAG "terminal"
 
-static wifi_config_t sta_config = {
-	.sta = {
-		.bssid_set = false
-	}
-};
-
-static const char *TAG = "roomba-wifi";
-
-/* The event group allows multiple bits for each event,
-   but we only care about one event - are we connected
-   to the AP with an IP? */
-const int CONNECTED_BIT = BIT0;
+#define NOT_FOUND_STR "\tUnknown command\n"
 
 
-/* FreeRTOS event group to signal when we are connected & ready to make a request */
-static EventGroupHandle_t wifi_event_group;
-
-static esp_err_t event_handler(void *ctx, system_event_t *event)
+typedef struct
 {
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
-        break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        /* This is a workaround as ESP32 WiFi libs don't currently
-           auto-reassociate. */
-        //esp_wifi_connect();
-    	ESP_LOGE(TAG, "disconnected!");
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    default:
-        break;
-    }
-    return ESP_OK;
+	command_function_t command_function;
+	const char* command;
+	void* stuff_to_call_command_with;
+} terminal_data_t;
+
+static terminal_data_t terminal_data[MAX_NUM_COMMANDS];
+
+static unsigned int num_commands_registered = 0;
+
+static QueueHandle_t uart_queue;
+static xTaskHandle  xTerminalTaskHandle = NULL;
+
+static char command_data[UART_QUEUE_RX_BUF_SIZE];
+static int command_data_total_length = 0;
+
+static void command_help(char* args, void* unused)
+{
+	for (int i = 0; i < num_commands_registered; i++)
+	{
+		uart_write_bytes(TERMINAL_UART_NUM, "    ", 4);
+		uart_write_bytes(TERMINAL_UART_NUM, terminal_data[i].command, strlen(terminal_data[i].command));
+		uart_write_bytes(TERMINAL_UART_NUM, "\n", 1);
+	}
 }
 
-void app_main(void)
+static void terminal_task(void *arg)
 {
-    nvs_flash_init();
+	//3. Read data from UART.
+	uint8_t data[128];
+	int length;
 
+	while(1)
+	{
+
+		length = uart_read_bytes(TERMINAL_UART_NUM, data, sizeof(data), 0);
+
+		if (length > 0)
+		{
+			// echo back chars
+			puts("test\n");
+			//uart_write_bytes(TERMINAL_UART_NUM, (const char*)data, length);
+/*
+			assert((length + command_data_total_length) < UART_QUEUE_RX_BUF_SIZE);
+
+			memcpy((void*)&command_data[command_data_total_length], data, length);
+			command_data_total_length += length;
+
+			if (command_data[command_data_total_length -1] == '\n' ||
+				command_data[command_data_total_length -1] == '\r')
+			{
+
+				// full command received, let's check which
+				// add \0 to the end
+				command_data[command_data_total_length] = '\0';
+
+				char* first_space_index = strchr(command_data, ' ');
+
+				if (first_space_index == NULL)
+					first_space_index = command_data + command_data_total_length;
+
+				// change the first space to a \0 to make the strcmp function work
+				*first_space_index = '\0';
+
+				bool found = false;
+				for (int i = 0; i < num_commands_registered; i++)
+				{
+					if (strcmp(command_data, terminal_data[i].command) == 0)
+					{
+						found = true;
+						terminal_data[i].command_function(first_space_index +1, terminal_data[i].stuff_to_call_command_with);
+						command_data_total_length = 0;
+						break;
+					}
+				}
+
+				if (!found)
+					uart_write_bytes(TERMINAL_UART_NUM, NOT_FOUND_STR, strlen(NOT_FOUND_STR));
+			}*/
+		}
+		vTaskDelay(1000);
+	}
+
+}
+
+esp_err_t terminal_init()
+{
+	esp_err_t error;
 	//1. Setup UART
 
-	#define UART_INTR_NUM 17                                //choose one interrupt number from soc.h
 
-    //a. Set UART parameter
-	int uart_num = 0;                                       //uart port number
+    //a. Set UART parameter                                     //uart port number
 	uart_config_t uart_config = {
 	 .baud_rate = 115200,                    //baudrate
 	 .data_bits = UART_DATA_8_BITS,                       //data bit mode
@@ -74,64 +122,31 @@ void app_main(void)
 	 .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,               //hardware flow control(cts/rts)
 	 .rx_flow_ctrl_thresh = 120,                          //flow control threshold
 	};
-	uart_param_config(uart_num, &uart_config);
+	uart_param_config(TERMINAL_UART_NUM, &uart_config);
 	//b1. Setup UART driver(with UART queue)
-	QueueHandle_t uart_queue;
-	//parameters here are just an example, tx buffer size is 2048
-	uart_driver_install(uart_num, 1024 * 2, 1024 * 2, 10, UART_INTR_NUM, &uart_queue);
-	//3. Read data from UART.
-	uint8_t data[128];
-	int length = 0;
-	int totallength = 0;
 
-	ESP_LOGI(TAG, "enter ssid: ");
-    do {
-		length = uart_read_bytes(uart_num, data, sizeof(data), 100);
-		if (length > 0)
-		{
-			memcpy(&sta_config.sta.ssid + totallength, data, length);
-			totallength += length;
-			uart_write_bytes(uart_num, (const char*)data, length);
-		}
-    } while (length == 0 || data[length -1] != '\r');
+	error = uart_driver_install(TERMINAL_UART_NUM, UART_QUEUE_RX_BUF_SIZE, UART_QUEUE_TX_BUF_SIZE, 10, UART_INTR_NUM, &uart_queue);
 
-    // replace carriage return with 0
-    sta_config.sta.ssid[totallength -1] = '\0';
+	if (error)
+		return error;
 
-    totallength = 0;
-    ESP_LOGI(TAG, "enter password: ");
-    do {
-		length = uart_read_bytes(uart_num, data, sizeof(data), 100);
-		if (length > 0)
-		{
-			memcpy(&sta_config.sta.password + totallength, data, length);
-			totallength += length;
-			uart_write_bytes(uart_num, (const char*)data, length);
-		}
-    } while (length == 0 || data[length -1] != '\r');
+	terminal_register_command("help", command_help, NULL);
 
-    // replace carriage return with 0
-    sta_config.sta.password[totallength -1] = '\0';
+	xTaskCreate(terminal_task, "Terminal_task", TERMINAL_TASK_STACK_SIZE, NULL, TERMINAL_TASK_PRIO, &xTerminalTaskHandle);
 
-    initialise_wifi();
-
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-                        false, true, portMAX_DELAY);
+	return ESP_OK;
 }
 
-
-static void initialise_wifi(void)
+esp_err_t terminal_register_command(const char* command, command_function_t command_function, void* args_to_give)
 {
-    tcpip_adapter_init();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", sta_config.sta.ssid);
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &sta_config) );
-    ESP_ERROR_CHECK( esp_wifi_start() );
-    esp_log_level_set("wifi", ESP_LOG_WARN);      // enable WARN logs from WiFi stack
+	assert(num_commands_registered < MAX_NUM_COMMANDS);
+
+	terminal_data[num_commands_registered].command = command;
+	terminal_data[num_commands_registered].command_function = command_function;
+	terminal_data[num_commands_registered].stuff_to_call_command_with = args_to_give;
+
+	num_commands_registered++;
+
+	return ESP_OK;
 }
 
