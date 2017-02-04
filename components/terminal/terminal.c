@@ -38,71 +38,90 @@ static xTaskHandle  xTerminalTaskHandle = NULL;
 static char command_data[UART_QUEUE_RX_BUF_SIZE];
 static int command_data_total_length = 0;
 
+
 static void command_help(char* args, void* unused)
 {
+	puts("List of commands:");
 	for (int i = 0; i < num_commands_registered; i++)
 	{
-		uart_write_bytes(TERMINAL_UART_NUM, "    ", 4);
-		uart_write_bytes(TERMINAL_UART_NUM, terminal_data[i].command, strlen(terminal_data[i].command));
-		uart_write_bytes(TERMINAL_UART_NUM, "\n", 1);
+		printf("    * %s\n", terminal_data[i].command);
+	}
+	putchar('\n');
+}
+
+
+static bool find_command()
+{
+	// full command received, let's check which
+	// replace \r by \0 at the end
+	command_data[command_data_total_length-1] = '\0';
+
+	char* first_space_index = strchr(command_data, ' ');
+
+	if (first_space_index != NULL)
+	{
+		// change the first space to a \0 to make the strcmp function work
+		*first_space_index = '\0';
+		first_space_index++;
+	}
+
+
+	if (strlen(command_data) > 0)
+	{
+		bool found = false;
+		for (int i = 0; i < num_commands_registered; i++)
+		{
+			if (strcmp(command_data, terminal_data[i].command) == 0)
+			{
+				found = true;
+				terminal_data[i].command_function(first_space_index, terminal_data[i].stuff_to_call_command_with);
+				break;
+			}
+		}
+
+		if (!found)
+		{
+			printf("%s", NOT_FOUND_STR);
+		}
+
+		return found;
+	}
+	else
+	{
+		return false;
 	}
 }
 
 static void terminal_task(void *arg)
 {
 	//3. Read data from UART.
-	uint8_t data[128];
-	int length;
+	memset(command_data, 0, sizeof(command_data));
+	command_data_total_length = 0;
 
 	while(1)
 	{
-
-		length = uart_read_bytes(TERMINAL_UART_NUM, data, sizeof(data), 0);
-
-		if (length > 0)
+		do
 		{
-			// echo back chars
-			puts("test\n");
-			//uart_write_bytes(TERMINAL_UART_NUM, (const char*)data, length);
-/*
-			assert((length + command_data_total_length) < UART_QUEUE_RX_BUF_SIZE);
+			assert(command_data_total_length < UART_QUEUE_RX_BUF_SIZE);
 
-			memcpy((void*)&command_data[command_data_total_length], data, length);
-			command_data_total_length += length;
-
-			if (command_data[command_data_total_length -1] == '\n' ||
-				command_data[command_data_total_length -1] == '\r')
+			command_data[command_data_total_length] = getchar();
+			if (command_data[command_data_total_length] != (char)EOF)
 			{
+				//printf("%d", command_data_total_length);
+				putchar(command_data[command_data_total_length]);
+				command_data_total_length++;
 
-				// full command received, let's check which
-				// add \0 to the end
-				command_data[command_data_total_length] = '\0';
-
-				char* first_space_index = strchr(command_data, ' ');
-
-				if (first_space_index == NULL)
-					first_space_index = command_data + command_data_total_length;
-
-				// change the first space to a \0 to make the strcmp function work
-				*first_space_index = '\0';
-
-				bool found = false;
-				for (int i = 0; i < num_commands_registered; i++)
+				if (command_data[command_data_total_length - 1] == '\r')
 				{
-					if (strcmp(command_data, terminal_data[i].command) == 0)
-					{
-						found = true;
-						terminal_data[i].command_function(first_space_index +1, terminal_data[i].stuff_to_call_command_with);
-						command_data_total_length = 0;
-						break;
-					}
+					putchar('\n');
+					find_command();
+					command_data_total_length = 0;
 				}
+			}
+		} while (command_data[command_data_total_length] != (char)EOF);
 
-				if (!found)
-					uart_write_bytes(TERMINAL_UART_NUM, NOT_FOUND_STR, strlen(NOT_FOUND_STR));
-			}*/
-		}
-		vTaskDelay(1000);
+		fflush(stdout);
+		vTaskDelay(100);
 	}
 
 }
@@ -111,6 +130,8 @@ esp_err_t terminal_init()
 {
 	esp_err_t error;
 	//1. Setup UART
+
+	num_commands_registered = 0;
 
 
     //a. Set UART parameter                                     //uart port number
@@ -122,13 +143,13 @@ esp_err_t terminal_init()
 	 .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,               //hardware flow control(cts/rts)
 	 .rx_flow_ctrl_thresh = 120,                          //flow control threshold
 	};
-	uart_param_config(TERMINAL_UART_NUM, &uart_config);
+	//uart_param_config(TERMINAL_UART_NUM, &uart_config);
 	//b1. Setup UART driver(with UART queue)
 
-	error = uart_driver_install(TERMINAL_UART_NUM, UART_QUEUE_RX_BUF_SIZE, UART_QUEUE_TX_BUF_SIZE, 10, UART_INTR_NUM, &uart_queue);
+	//error = uart_driver_install(TERMINAL_UART_NUM, UART_QUEUE_RX_BUF_SIZE, UART_QUEUE_TX_BUF_SIZE, 10, &uart_queue, 0);
 
-	if (error)
-		return error;
+	//if (error)
+	//	return error;
 
 	terminal_register_command("help", command_help, NULL);
 

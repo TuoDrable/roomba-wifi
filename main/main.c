@@ -66,7 +66,7 @@ static void command_config_wifi(char* args, void* unused)
 {
 	char* tmp;
 	char* ssid = args;
-	char* password = strchr((const char*)args, ' ');
+	char* password;
 
 
 	if (args == NULL)
@@ -75,6 +75,8 @@ static void command_config_wifi(char* args, void* unused)
 		ESP_LOGW(TAG, "usage: setup_wifi SSID PASSWORD");
 		return;
 	}
+
+	password = strchr((const char*)args, ' ');
 
 	if (password == NULL)
 	{
@@ -123,6 +125,8 @@ void app_main(void)
 
     xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
                         false, true, portMAX_DELAY);
+
+
 }
 
 /*
@@ -153,6 +157,6 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &sta_config) );
     ESP_ERROR_CHECK( esp_wifi_start() );
-    esp_log_level_set("wifi", ESP_LOG_WARN);      // enable WARN logs from WiFi stack
+    //esp_log_level_set("wifi", ESP_LOG_WARN);      // enable WARN logs from WiFi stack
 }
 
